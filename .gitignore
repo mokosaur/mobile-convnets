@@ -99,3 +99,16 @@ ENV/
 
 # mypy
 .mypy_cache/
+
+# idea
+.idea/
+
+# images
+datasets/*/
+
+# models
+training/tmp/
+training/summary/
+training/shallowsqueeze/
+
+*.tfrecords
