@@ -15,7 +15,7 @@ def _bytes_feature(value):
 
 def load_image(src):
     im = cv2.imread(src, 1)
-    im = cv2.resize(im, (224, 224), interpolation=cv2.INTER_CUBIC)
+    im = cv2.resize(im, (448, 448), interpolation=cv2.INTER_CUBIC)
     im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
     im = im.astype(np.float32)
     return im
