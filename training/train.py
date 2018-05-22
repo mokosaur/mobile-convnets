@@ -4,6 +4,7 @@ from training.models import alexnet
 from training.models.mobilenet import mobilenet_v2
 import math
 import numpy as np
+import cv2
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -50,7 +51,7 @@ def generate_model_fn(topology_fn, num_classes=12, preprocessor_fn=gpu_augmentat
         tf.summary.scalar("accuracy", acc[1])
         tf.summary.scalar("top3accuracy", top3acc[1])
         tf.summary.image("input", input)
-        tf.summary.histogram("softmax", predictions['probabilities'])
+        # tf.summary.histogram("softmax", predictions['probabilities'])
 
         if mode == tf.estimator.ModeKeys.TRAIN:
             update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -64,19 +65,19 @@ def generate_model_fn(topology_fn, num_classes=12, preprocessor_fn=gpu_augmentat
             return tf.estimator.EstimatorSpec(mode=mode, loss=loss, train_op=train_op,
                                               training_hooks=[logging_hook])
 
+        confusion_matrix = eval_confusion_matrix(labels=labels, predictions=predictions["classes"],
+                                                 num_classes=num_classes)
         eval_metric_ops = {
             "accuracy": acc,
             "top3accuracy": top3acc,
-            "confusion_matrix": eval_confusion_matrix(labels=labels, predictions=predictions["classes"],
-                                                      num_classes=num_classes)
+            "confusion_matrix": confusion_matrix
         }
-        return tf.estimator.EstimatorSpec(
-            mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)
+        return tf.estimator.EstimatorSpec(mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)
 
     return model_fn
 
 
-def parse_fn(example, mode):
+def parse_fn(example, mode, clahe=None):
     feature = {mode + '/image': tf.FixedLenFeature([], tf.string),
                mode + '/label': tf.FixedLenFeature([], tf.int64)}
     features = tf.parse_single_example(example, features=feature)
@@ -87,15 +88,15 @@ def parse_fn(example, mode):
     return image, label
 
 
-def generate_input_fn(dataset_name, mode='train', batch_size=16, repeat=True):
+def generate_input_fn(dataset_name, mode='train', batch_size=1, shuffle_buffer=512):
     def input_fn():
         dataset = tf.data.TFRecordDataset('../datasets/%s-%s.tfrecords' % (dataset_name, mode))
-        dataset = dataset.shuffle(buffer_size=512)
         dataset = dataset.map(map_func=lambda x: parse_fn(x, mode), num_parallel_calls=4)
-        if repeat:
+        if mode != 'val':
+            dataset = dataset.shuffle(buffer_size=shuffle_buffer)
             dataset = dataset.repeat()
         dataset = dataset.batch(batch_size=batch_size)
-        dataset = dataset.prefetch(buffer_size=512)
+        dataset = dataset.prefetch(buffer_size=1)
         iterator = dataset.make_one_shot_iterator()
         images, labels = iterator.get_next()
 
@@ -136,11 +137,14 @@ models = {
     }
 }
 
+dataset_name = 'cladoniaclahe'
 model_name = 'mobilenet_v2'
 num_epochs = 5000
-train_size = sum(1 for _ in tf.python_io.tf_record_iterator('../datasets/cladonia-train.tfrecords'))
+train_size = sum(1 for _ in tf.python_io.tf_record_iterator('../datasets/%s-train.tfrecords' % dataset_name))
+test_size = sum(1 for _ in tf.python_io.tf_record_iterator('../datasets/%s-val.tfrecords' % dataset_name))
 batch_size = 16
 epoch_size = train_size // batch_size
+eval_every_n_epochs = 10
 
 classifier = tf.estimator.Estimator(
     model_fn=generate_model_fn(models[model_name]['architecture'], arg_scope=models[model_name]['scope']),
@@ -148,6 +152,8 @@ classifier = tf.estimator.Estimator(
     config=tf.estimator.RunConfig(save_summary_steps=epoch_size)
 )
 
-for e in range(num_epochs // 50):
-    classifier.train(input_fn=generate_input_fn('cladonia', batch_size=batch_size), steps=epoch_size * 50)
-    classifier.evaluate(input_fn=generate_input_fn('cladonia', mode='val', repeat=False))
+train_input_fn = generate_input_fn(dataset_name, batch_size=batch_size, shuffle_buffer=train_size)
+for e in range(num_epochs // eval_every_n_epochs):
+    classifier.train(input_fn=train_input_fn, steps=epoch_size * eval_every_n_epochs)
+    metrics = classifier.evaluate(input_fn=generate_input_fn(dataset_name, mode='val'))
+    np.save("./tmp/%s/cm-%s" % (model_name, metrics['global_step']), metrics['confusion_matrix'])
