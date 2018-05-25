@@ -5,6 +5,8 @@ from training.models.mobilenet import mobilenet_v2
 import math
 import numpy as np
 import cv2
+import shutil
+import os
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -29,7 +31,8 @@ def gpu_augmentation_fn(images):
     return images
 
 
-def generate_model_fn(topology_fn, num_classes=12, preprocessor_fn=gpu_augmentation_fn, arg_scope=lambda x: []):
+def generate_model_fn(topology_fn, num_classes=12, preprocessor_fn=gpu_augmentation_fn, arg_scope=lambda x: [],
+                      transfer_checkpoint_dir='', exclude=('Logits',)):
     def model_fn(features, labels, mode):
         input = preprocessor_fn(features['x']) if preprocessor_fn else features['x']
         with tf.contrib.slim.arg_scope(arg_scope(mode == tf.estimator.ModeKeys.TRAIN)):
@@ -39,6 +42,16 @@ def generate_model_fn(topology_fn, num_classes=12, preprocessor_fn=gpu_augmentat
             "classes": tf.argmax(input=logits, axis=1),
             "probabilities": tf.nn.softmax(logits, name="softmax_tensor")
         }
+
+        variables_to_train = None
+        if transfer_checkpoint_dir:
+            variables_to_train = [v for v in tf.trainable_variables() if
+                                    any('/%s/' % x in v.name for x in exclude)]
+            variables_to_restore = [v for v in tf.trainable_variables() if
+                                    not any('/%s/' % x in v.name for x in exclude)]
+            tf.train.init_from_checkpoint(transfer_checkpoint_dir,
+                                          {v.name.split(':')[0]: v for v in variables_to_restore})
+
         if mode == tf.estimator.ModeKeys.PREDICT:
             return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
 
@@ -51,7 +64,6 @@ def generate_model_fn(topology_fn, num_classes=12, preprocessor_fn=gpu_augmentat
         tf.summary.scalar("accuracy", acc[1])
         tf.summary.scalar("top3accuracy", top3acc[1])
         tf.summary.image("input", input)
-        # tf.summary.histogram("softmax", predictions['probabilities'])
 
         if mode == tf.estimator.ModeKeys.TRAIN:
             update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -60,7 +72,8 @@ def generate_model_fn(topology_fn, num_classes=12, preprocessor_fn=gpu_augmentat
                 optimizer = tf.train.AdamOptimizer()
                 train_op = optimizer.minimize(
                     loss=loss,
-                    global_step=tf.train.get_global_step())
+                    global_step=tf.train.get_global_step(),
+                    var_list=variables_to_train)
             logging_hook = tf.train.LoggingTensorHook({"loss": loss}, every_n_iter=5)
             return tf.estimator.EstimatorSpec(mode=mode, loss=loss, train_op=train_op,
                                               training_hooks=[logging_hook])
@@ -122,6 +135,14 @@ def cpu_augmentation_fn(image, mode):
     return image
 
 
+def copy_checkpoint(source, dest, global_step):
+    checkpoint = '%s/model.ckpt-%s.' % (source, global_step)
+    if not os.path.exists(dest):
+        os.makedirs(dest)
+    for format in ["data-00000-of-00001", "index", "meta"]:
+        shutil.copy(checkpoint + format, dest + '/')
+
+
 models = {
     'squeezenet': {
         'architecture': squeezenet.squeezenet,
@@ -137,7 +158,7 @@ models = {
     }
 }
 
-dataset_name = 'cladoniaclahe'
+dataset_name = 'cladonia'
 model_name = 'mobilenet_v2'
 num_epochs = 5000
 train_size = sum(1 for _ in tf.python_io.tf_record_iterator('../datasets/%s-train.tfrecords' % dataset_name))
@@ -146,14 +167,19 @@ batch_size = 16
 epoch_size = train_size // batch_size
 eval_every_n_epochs = 10
 
-classifier = tf.estimator.Estimator(
-    model_fn=generate_model_fn(models[model_name]['architecture'], arg_scope=models[model_name]['scope']),
-    model_dir="./tmp/" + model_name,
-    config=tf.estimator.RunConfig(save_summary_steps=epoch_size)
-)
+if __name__ == "__main__":
+    classifier = tf.estimator.Estimator(
+        model_fn=generate_model_fn(models[model_name]['architecture'], arg_scope=models[model_name]['scope']),
+        model_dir="./tmp/" + model_name,
+        config=tf.estimator.RunConfig(save_summary_steps=epoch_size)
+    )
 
-train_input_fn = generate_input_fn(dataset_name, batch_size=batch_size, shuffle_buffer=train_size)
-for e in range(num_epochs // eval_every_n_epochs):
-    classifier.train(input_fn=train_input_fn, steps=epoch_size * eval_every_n_epochs)
-    metrics = classifier.evaluate(input_fn=generate_input_fn(dataset_name, mode='val'))
-    np.save("./tmp/%s/cm-%s" % (model_name, metrics['global_step']), metrics['confusion_matrix'])
+    best_acc = 0.
+    train_input_fn = generate_input_fn(dataset_name, batch_size=batch_size, shuffle_buffer=train_size)
+    for e in range(num_epochs // eval_every_n_epochs):
+        classifier.train(input_fn=train_input_fn, steps=eval_every_n_epochs * epoch_size)
+        metrics = classifier.evaluate(input_fn=generate_input_fn(dataset_name, mode='val'))
+        np.save("./tmp/%s/cm-%s" % (model_name, metrics['global_step']), metrics['confusion_matrix'])
+        if metrics['accuracy'] > best_acc:
+            best_acc = metrics['accuracy']
+            copy_checkpoint('./tmp/%s' % model_name, './tmp/%s/best' % model_name, metrics['global_step'])

@@ -57,5 +57,6 @@ def save_data(source_name, dataset_name=None, train=.8, seed=44, filters='RGB', 
         writer.close()
 
 
-p = preprocessing.PCAPreprocessor()
-save_data('cladonia', 'cladoniapca', filters=None, preprocessor=p)
+# p = preprocessing.PCAPreprocessor()
+# save_data('cladonia', 'cladoniapca', filters=None, preprocessor=p)
+save_data('cladonia')
