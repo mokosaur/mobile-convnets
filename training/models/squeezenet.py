@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
+from tensorflow.python.ops import nn
 
 slim = tf.contrib.slim
 
@@ -13,15 +14,16 @@ def fire_module(inputs, filters, name='fire_module'):
         x1 = slim.conv2d(x, filters // 2, [1, 1], activation_fn=None)
         x2 = slim.conv2d(x, filters // 2, [3, 3], padding='same', activation_fn=None)
         x = tf.concat([x1, x2], 3)
-        return tf.nn.relu(x)
+        return nn.relu(x)
 
 
+@slim.add_arg_scope
 def squeezenet(inputs, num_classes=100, is_training=True, dropout_keep_prob=0.5, scope='squeezenet'):
     with tf.variable_scope(scope, 'squeezenet', [inputs]) as sc:
         end_points_collection = sc.original_name_scope + '_end_points'
         with slim.arg_scope([slim.conv2d, slim.fully_connected, slim.max_pool2d],
                             outputs_collections=[end_points_collection]):
-            net = slim.conv2d(inputs, 96, [7, 7], 2)
+            net = slim.conv2d(inputs, 96, [7, 7], 2, scope='base_conv_1')
             net = slim.max_pool2d(net, [3, 3], 2)
             net = fire_module(net, 128)
             net = fire_module(net, 128)
@@ -33,62 +35,62 @@ def squeezenet(inputs, num_classes=100, is_training=True, dropout_keep_prob=0.5,
             net = fire_module(net, 512)
             net = slim.max_pool2d(net, [3, 3], 2)
             net = fire_module(net, 512)
-            net = tf.layers.dropout(net, dropout_keep_prob, training=is_training)
-            net = slim.conv2d(net, 1000, [1, 1], 1)
-            net = tf.layers.flatten(net, name='flatten')
-            net = tf.layers.dense(inputs=net, units=num_classes)
+            net = slim.dropout(net, is_training=is_training)
+            net = slim.conv2d(net, num_classes, [1, 1], 1, scope='base_conv_2')
+            net = tf.reduce_mean(net, [1, 2])
 
             end_points = slim.utils.convert_collection_to_dict(end_points_collection)
 
             return net, end_points
 
 
-def cnn_architecture(inputs, module, outputs, training_mode, num_class=4, learning_rate=0.001):
-    x = inputs
-    x = tf.layers.conv2d(x, 96, [7, 7], 2, activation=tf.nn.relu)
-    x = tf.layers.max_pooling2d(x, [3, 3], 2)
-    x = module(x, 128)
-    x = module(x, 128)
-    x = module(x, 256)
-    x = tf.layers.max_pooling2d(x, [3, 3], 2)
-    x = module(x, 256)
-    x = module(x, 384)
-    x = module(x, 384)
-    x = module(x, 512)
-    x = tf.layers.max_pooling2d(x, [3, 3], 2)
-    x = module(x, 512)
-    x = tf.layers.dropout(x, training=training_mode)
-    x = tf.layers.conv2d(x, 1000, [1, 1], 1, activation=tf.nn.relu)
-    x = tf.layers.flatten(x, name='flatten')
-    with tf.name_scope('logits'):
-        logits = tf.layers.dense(inputs=x, units=num_class)
+class NoOpScope(object):
+    """No-op context manager."""
 
-    with tf.name_scope('predictions'):
-        predictions = {
-            "classes": tf.argmax(logits, axis=1),
-            "probabilities": tf.nn.softmax(logits)
-        }
+    def __enter__(self):
+        return None
 
-    with tf.name_scope('loss'):
-        onehot_labels = tf.one_hot(indices=tf.cast(outputs, tf.int32), depth=num_class)
-        loss = tf.losses.softmax_cross_entropy(onehot_labels=onehot_labels, logits=logits)
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
 
-    with tf.name_scope('accuracy'):
-        correct_prediction = tf.equal(predictions['classes'], tf.cast(outputs, tf.int64))
-        accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
-    optimizer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
-    train_op = optimizer.minimize(loss=loss, global_step=tf.train.get_global_step())
+def safe_arg_scope(funcs, **kwargs):
+    """Returns `slim.arg_scope` with all None arguments removed.
 
-    loss_summary = tf.summary.scalar("loss_%s" % module.__name__, loss)
-    acc_summary = tf.summary.scalar("accuracy_%s" % module.__name__, accuracy)
+    Arguments:
+      funcs: Functions to pass to `arg_scope`.
+      **kwargs: Arguments to pass to `arg_scope`.
 
-    return {
-        "predictions": predictions,
-        "loss": loss,
-        "accuracy": accuracy,
-        "optimizer": optimizer,
-        "train_op": train_op,
-        "loss_summary": loss_summary,
-        "acc_summary": acc_summary
+    Returns:
+      arg_scope or No-op context manager.
+
+    Note: can be useful if None value should be interpreted as "do not overwrite
+      this parameter value".
+    """
+    filtered_args = {name: value for name, value in kwargs.items()
+                     if value is not None}
+    if filtered_args:
+        return slim.arg_scope(funcs, **filtered_args)
+    else:
+        return NoOpScope()
+
+
+def training_scope(is_training=True, stddev=0.09, dropout_keep_prob=0.5, bn_decay=0.997):
+    batch_norm_params = {
+        'decay': bn_decay,
+        'is_training': is_training
     }
+    if stddev < 0:
+        weight_intitializer = slim.initializers.xavier_initializer()
+    else:
+        weight_intitializer = tf.truncated_normal_initializer(stddev=stddev)
+
+    # Set weight_decay for weights in Conv and FC layers.
+    with slim.arg_scope(
+            [slim.conv2d, slim.fully_connected],
+            weights_initializer=weight_intitializer,
+            normalizer_fn=slim.batch_norm), \
+         safe_arg_scope([slim.batch_norm], **batch_norm_params), \
+         safe_arg_scope([slim.dropout], is_training=is_training,
+                        keep_prob=dropout_keep_prob) as s:
+        return s

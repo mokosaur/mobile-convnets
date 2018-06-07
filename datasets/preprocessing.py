@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import cv2
 import numpy as np
 from sklearn.decomposition import PCA
+from sklearn.decomposition import FastICA
 
 
 class Preprocessor(ABC):
@@ -28,8 +29,35 @@ class PCAPreprocessor(Preprocessor):
         self.pca = PCA(n_components)
 
     def apply(self, img):
-        h, w, d = img.shape
-        img = np.reshape(img, (w * h, d))
-        img = self.pca.fit_transform(img)
-        img = np.reshape(img, (w, h, self.n_components))
-        return img
+        if len(img.shape) == 3:
+            h, w, d = img.shape
+            img = np.reshape(img, (w * h, d))
+            img = self.pca.fit_transform(img)
+            img = np.reshape(img, (w, h, self.n_components))
+            return img
+        else:
+            n, h, w, d = img.shape
+            img = np.reshape(img, (n * w * h, d))
+            img = self.pca.fit_transform(img)
+            img = np.reshape(img, (n, w, h, self.n_components))
+            return img
+
+
+class ICAPreprocessor(Preprocessor):
+    def __init__(self, n_components=3):
+        self.n_components = n_components
+        self.ica = FastICA(n_components)
+
+    def apply(self, img):
+        if len(img.shape) == 3:
+            h, w, d = img.shape
+            img = np.reshape(img, (w * h, d))
+            img = self.ica.fit_transform(img)
+            img = np.reshape(img, (w, h, self.n_components))
+            return img
+        else:
+            n, h, w, d = img.shape
+            img = np.reshape(img, (n * w * h, d))
+            img = self.ica.fit_transform(img)
+            img = np.reshape(img, (n, w, h, self.n_components))
+            return img

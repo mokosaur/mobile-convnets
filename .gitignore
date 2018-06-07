@@ -110,5 +110,9 @@ datasets/*/
 training/tmp/
 training/summary/
 training/shallowsqueeze/
+training/checkpoints/
 
 *.tfrecords
+*.tar.gz
+*.txt
+*.ipynb
